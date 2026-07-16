@@ -106,12 +106,24 @@ function useRecorder() {
   const start = async () => {
     setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream);
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      const preferredTypes = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4",
+        "audio/aac",
+      ];
+      const supportedType = preferredTypes.find(
+        (t) => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)
+      );
+
+      const mr = supportedType ? new MediaRecorder(stream, { mimeType: supportedType }) : new MediaRecorder(stream);
       chunksRef.current = [];
       mr.ondataavailable = (e) => chunksRef.current.push(e.data);
       mr.onstop = async () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const actualType = mr.mimeType || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: actualType });
         setAudioUrl(URL.createObjectURL(blob));
         const b64 = await blobToBase64(blob);
         setAudioBase64(b64);
