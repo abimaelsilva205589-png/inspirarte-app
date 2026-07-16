@@ -980,19 +980,8 @@ function ProducerSettingsView({ settings, onSave, onBack }) {
 
   return (
     <div className="max-w-md mx-auto">
-      <button onClick={onBack} className="mb-6 font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}>
-        <ArrowLeft size={14} /> voltar
-      </button>
-      <h1 className="font-display text-2xl mb-6">DADOS DE PAGAMENTO</h1>
-      <div className="p-6" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
-        <Field label="WhatsApp para contato">
-          <input value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} className="w-full px-3 py-2.5" style={inputStyle} placeholder="(00) 00000-0000" />
-        </Field>
-        <Field label="Chave Pix">
-          <input value={pix} onChange={(e) => setPix(e.target.value)} className="w-full px-3 py-2.5" style={inputStyle} placeholder="CPF, e-mail, telefone ou chave aleatória" />
+      <button onClick={onBack} className="
         </Field>
         <PrimaryButton onClick={save} full>{saved ? <><CheckCircle2 size={16} /> Salvo!</> : "Salvar dados"}</PrimaryButton>
       </div>
-    </div>
-  );
-}
+    </
