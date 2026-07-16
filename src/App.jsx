@@ -1375,7 +1375,14 @@ function ProducerOrderDetail({ order, onBack, onUpdate, onDelete }) {
         <div className="font-mono text-xs uppercase tracking-widest mb-1" style={{ color: "#8a8378" }}>Letra</div>
         <div className="p-3 text-sm whitespace-pre-wrap max-h-48 overflow-auto mb-4" style={{ background: "#141210", border: "1px solid #3A342C" }}>{order.lyrics}</div>
         <div className="font-mono text-xs uppercase tracking-widest mb-1" style={{ color: "#8a8378" }}>Áudio de referência do cliente</div>
-        {order.refAudio && <audio controls src={order.refAudio} className="w-full" />}
+        {order.refAudio && (
+          <>
+            <audio controls src={order.refAudio} className="w-full mb-3" />
+            <a href={order.refAudio} download={`${order.title || "referencia"} - ${order.clientName || "cliente"}`}>
+              <GhostButton><Download size={14} /> Baixar áudio do cliente</GhostButton>
+            </a>
+          </>
+        )}
       </div>
 
       <div className="p-5 mb-5" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
