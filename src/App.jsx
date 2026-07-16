@@ -63,6 +63,128 @@ function blobToBase64(blob) {
 }
 
 /* ---------------------------------------------------------
+   Conversão do áudio gravado (webm/mp4/aac) para WAV.
+   WAV é lido nativamente por qualquer dispositivo (iPhone,
+   Android, Windows, Mac), diferente do WebM que o iOS não
+   consegue abrir fora do navegador.
+---------------------------------------------------------- */
+function writeWavString(view, offset, string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}
+
+function floatTo16BitPCM(view, offset, input) {
+  for (let i = 0; i < input.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+}
+
+function interleaveChannels(inputL, inputR) {
+  const length = inputL.length + inputR.length;
+  const result = new Float32Array(length);
+  let index = 0, inputIndex = 0;
+  while (index < length) {
+    result[index++] = inputL[inputIndex];
+    result[index++] = inputR[inputIndex];
+    inputIndex++;
+  }
+  return result;
+}
+
+function audioBufferToWavBlob(buffer) {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const bitDepth = 16;
+  const samples = numChannels === 2
+    ? interleaveChannels(buffer.getChannelData(0), buffer.getChannelData(1))
+    : buffer.getChannelData(0);
+
+  const bytesPerSample = bitDepth / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  const arrayBuffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+  const view = new DataView(arrayBuffer);
+
+  writeWavString(view, 0, "RIFF");
+  view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+  writeWavString(view, 8, "WAVE");
+  writeWavString(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitDepth, true);
+  writeWavString(view, 36, "data");
+  view.setUint32(40, samples.length * bytesPerSample, true);
+  floatTo16BitPCM(view, 44, samples);
+
+  return new Blob([view], { type: "audio/wav" });
+}
+
+async function convertRecordingToWav(blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioCtx();
+  try {
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    return audioBufferToWavBlob(audioBuffer);
+  } finally {
+    audioCtx.close();
+  }
+}
+
+/* ---------------------------------------------------------
+   Download de áudio (data URI) com extensão correta.
+   Usar apenas <a href={dataUri} download="nome"> não garante
+   a extensão certa (.mp3/.wav) nem funciona de forma confiável
+   no Safari/iOS — por isso convertemos para um Blob real antes
+   de disparar o download.
+---------------------------------------------------------- */
+function extensionFromDataUrl(dataUrl) {
+  const match = /^data:audio\/([a-zA-Z0-9.+-]+);base64,/.exec(dataUrl || "");
+  if (!match) return "mp3";
+  const subtype = match[1].toLowerCase();
+  if (subtype.includes("wav")) return "wav";
+  if (subtype.includes("mpeg") || subtype.includes("mp3")) return "mp3";
+  if (subtype.includes("mp4") || subtype.includes("m4a") || subtype.includes("aac")) return "m4a";
+  if (subtype.includes("ogg")) return "ogg";
+  if (subtype.includes("webm")) return "webm";
+  return "mp3";
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [header, base64] = dataUrl.split(",");
+  const mimeMatch = /data:(.*?);base64/.exec(header);
+  const mime = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+function downloadAudioFile(dataUrl, baseName) {
+  if (!dataUrl) return;
+  try {
+    const ext = extensionFromDataUrl(dataUrl);
+    const blob = dataUrlToBlob(dataUrl);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(baseName || "audio").replace(/[\\/:*?"<>|]+/g, "_")}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (err) {
+    console.error("Erro ao baixar áudio:", err);
+    window.open(dataUrl, "_blank");
+  }
+}
+
+/* ---------------------------------------------------------
    Metronome hook (Web Audio API)
 ---------------------------------------------------------- */
 function useMetronome() {
@@ -138,9 +260,20 @@ function useRecorder() {
       mr.onstop = async () => {
         // Usa o mimeType que o MediaRecorder de fato usou, não um valor fixo
         const actualType = mr.mimeType || "audio/webm";
-        const blob = new Blob(chunksRef.current, { type: actualType });
-        setAudioUrl(URL.createObjectURL(blob));
-        const b64 = await blobToBase64(blob);
+        const rawBlob = new Blob(chunksRef.current, { type: actualType });
+
+        // Converte para WAV para garantir que o arquivo abra em qualquer
+        // dispositivo (iPhone, Android, etc.), independente do formato
+        // que o navegador do cliente usou para gravar.
+        let finalBlob = rawBlob;
+        try {
+          finalBlob = await convertRecordingToWav(rawBlob);
+        } catch (err) {
+          console.warn("Não foi possível converter o áudio para WAV, usando formato original:", err);
+        }
+
+        setAudioUrl(URL.createObjectURL(finalBlob));
+        const b64 = await blobToBase64(finalBlob);
         setAudioBase64(b64);
         stream.getTracks().forEach((t) => t.stop());
       };
@@ -305,7 +438,7 @@ export default function App() {
   const [producerAuthed, setProducerAuthed] = useState(false);
   const [producerSettings, setProducerSettings] = useState({ whatsapp: "", pix: "", password: "", aboutText: "", videoUrl: "", videoFile: null, photos: [], audioExamples: [], testimonials: [] });
   const sharedPreviewId = new URLSearchParams(window.location.search).get("preview");
-  const [view, setView] = useState("lista"); // lista | novo | detalhe | config
+  const [view, setView] = useState("lista"); // lista | novo | detalhe | config | mensagens
   const [activeOrderId, setActiveOrderId] = useState(null);
   const [preLoginView, setPreLoginView] = useState("apresentacao"); // apresentacao | login (antes do cliente logar)
 
@@ -375,7 +508,11 @@ export default function App() {
   const saveProducerSettings = async (next) => {
     setProducerSettings(next);
     const { error } = await supabase.from("producer_settings").upsert({ id: 1, data: next });
-    if (error) console.error("Erro ao salvar configurações do produtor:", error.message);
+    if (error) {
+      console.error("Erro ao salvar configurações do produtor:", error.message);
+      return { error };
+    }
+    return { error: null };
   };
 
   if (sharedPreviewId) {
@@ -499,16 +636,20 @@ export default function App() {
             onSave={saveProducerSettings}
             onBack={() => setView("lista")}
           />
+        ) : view === "mensagens" ? (
+          <ProducerMessagesView onBack={() => setView("lista")} />
         ) : (
           <ProducerDashboard
             orders={orders}
             onOpen={(id) => { setActiveOrderId(id); setView("detalhe"); }}
             onDelete={deleteOrder}
             onConfig={() => setView("config")}
+            onMessages={() => setView("mensagens")}
             onLogout={() => setProducerAuthed(false)}
           />
         )}
       </main>
+      {role === "cliente" && <ChatWidget />}
     </div>
   );
 }
@@ -1077,9 +1218,9 @@ function ClientOrderDetail({ order, producerSettings, onBack, onUpdate, onDelete
             <div className="p-5 text-center" style={{ background: "#1D1A16", border: "1px solid #4E9463" }}>
               <CheckCircle2 className="mx-auto mb-2" size={22} style={{ color: "#4E9463" }} />
               <p className="font-mono text-sm mb-4">Pagamento confirmado! Sua música está liberada.</p>
-              <a href={order.finalAudio} download={order.title}>
-                <PrimaryButton><Download size={16} /> Baixar música final</PrimaryButton>
-              </a>
+              <PrimaryButton onClick={() => downloadAudioFile(order.finalAudio, order.title || "musica-final")}>
+                <Download size={16} /> Baixar música final
+              </PrimaryButton>
             </div>
           )}
         </div>
@@ -1185,7 +1326,7 @@ function ProducerLogin({ hasPassword, onAuth }) {
 /* ---------------------------------------------------------
    Producer: dashboard
 ---------------------------------------------------------- */
-function ProducerDashboard({ orders, onOpen, onDelete, onConfig, onLogout }) {
+function ProducerDashboard({ orders, onOpen, onDelete, onConfig, onMessages, onLogout }) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("todos");
 
@@ -1210,6 +1351,7 @@ function ProducerDashboard({ orders, onOpen, onDelete, onConfig, onLogout }) {
           <h1 className="font-display text-2xl">PRODUTOR</h1>
         </div>
         <div className="flex items-center gap-4">
+          <button onClick={onMessages} className="font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}><MessageCircle size={14} /> mensagens</button>
           <button onClick={onConfig} className="font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}><Settings size={14} /> config</button>
           <button onClick={onLogout} className="font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}><LogOut size={14} /> sair</button>
         </div>
@@ -1378,9 +1520,9 @@ function ProducerOrderDetail({ order, onBack, onUpdate, onDelete }) {
         {order.refAudio && (
           <>
             <audio controls src={order.refAudio} className="w-full mb-3" />
-            <a href={order.refAudio} download={`${order.title || "referencia"} - ${order.clientName || "cliente"}`}>
-              <GhostButton><Download size={14} /> Baixar áudio do cliente</GhostButton>
-            </a>
+            <GhostButton onClick={() => downloadAudioFile(order.refAudio, `${order.title || "referencia"} - ${order.clientName || "cliente"}`)}>
+              <Download size={14} /> Baixar áudio do cliente
+            </GhostButton>
           </>
         )}
       </div>
@@ -1474,8 +1616,15 @@ function ProducerSettingsView({ settings, onSave, onBack }) {
   const audioInputRef = useRef(null);
   const videoInputRef = useRef(null);
 
+  const [saveError, setSaveError] = useState("");
+
   const save = async () => {
-    await onSave({ ...settings, whatsapp, pix, aboutText, videoUrl, videoFile, photos, audioExamples, testimonials });
+    setSaveError("");
+    const result = await onSave({ ...settings, whatsapp, pix, aboutText, videoUrl, videoFile, photos, audioExamples, testimonials });
+    if (result?.error) {
+      setSaveError("Não foi possível salvar. Verifique sua conexão e tente novamente — se o problema continuar, os arquivos enviados podem estar grandes demais.");
+      return;
+    }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -1484,11 +1633,22 @@ function ProducerSettingsView({ settings, onSave, onBack }) {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadingVideo(true);
+    setSaveError("");
     try {
-      const b64 = await blobToBase64(file);
-      setVideoFile(b64);
+      const path = `videos/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.\-_]+/g, "_")}`;
+      const { error: uploadError } = await supabase.storage
+        .from("media")
+        .upload(path, file, { upsert: true, contentType: file.type });
+      if (uploadError) {
+        setSaveError("Não foi possível enviar o vídeo: " + uploadError.message);
+        return;
+      }
+      const { data: pub } = supabase.storage.from("media").getPublicUrl(path);
+      setVideoFile(pub.publicUrl);
       setVideoFileName(file.name);
       setVideoUrl(""); // upload e link são alternativos — o arquivo tem prioridade
+    } catch (err) {
+      setSaveError("Não foi possível enviar o vídeo: " + err.message);
     } finally {
       setUploadingVideo(false);
       e.target.value = "";
@@ -1663,6 +1823,253 @@ function ProducerSettingsView({ settings, onSave, onBack }) {
       </div>
 
       <PrimaryButton onClick={save} full>{saved ? <><CheckCircle2 size={16} /> Salvo!</> : "Salvar tudo"}</PrimaryButton>
+      {saveError && (
+        <p className="text-xs mt-3 text-center" style={{ color: "#C6342A" }}>{saveError}</p>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Chat — balão flutuante (visitante/cliente) e painel de
+   mensagens do produtor. Usa a tabela "chat_messages" no
+   Supabase (visitor_id, sender, text, created_at).
+---------------------------------------------------------- */
+const CHAT_WELCOME_TEXT = "Olá, seja bem-vindo à plataforma InspirArte! Ficamos muito felizes pelo seu contato. Breve um de nossos atendentes irá entrar em contato para tirar suas dúvidas!";
+
+function ChatBubble({ text, fromProducer }) {
+  return (
+    <div className={`flex ${fromProducer ? "justify-start" : "justify-end"}`}>
+      <div
+        className="px-3 py-2 text-sm max-w-[85%]"
+        style={{
+          background: fromProducer ? "#141210" : "#C6342A",
+          color: "#ECE3D0",
+          border: fromProducer ? "1px solid #3A342C" : "none",
+        }}
+      >
+        {text}
+      </div>
+    </div>
+  );
+}
+
+function ChatWidget() {
+  const [open, setOpen] = useState(false);
+  const [visitorId] = useState(() => {
+    let id = "";
+    try { id = localStorage.getItem("inspirarte_chat_visitor_id") || ""; } catch {}
+    if (!id) {
+      id = uid();
+      try { localStorage.setItem("inspirarte_chat_visitor_id", id); } catch {}
+    }
+    return id;
+  });
+  const [messages, setMessages] = useState([]);
+  const [text, setText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const scrollRef = useRef(null);
+
+  const loadMessages = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("chat_messages")
+      .select("*")
+      .eq("visitor_id", visitorId)
+      .order("created_at", { ascending: true });
+    if (!error) setMessages(data || []);
+  }, [visitorId]);
+
+  const ensureWelcome = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("chat_messages")
+      .select("id")
+      .eq("visitor_id", visitorId)
+      .limit(1);
+    if (!error && (!data || data.length === 0)) {
+      await supabase.from("chat_messages").insert({ visitor_id: visitorId, sender: "producer", text: CHAT_WELCOME_TEXT });
+    }
+  }, [visitorId]);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      await ensureWelcome();
+      if (!cancelled) await loadMessages();
+      setLoading(false);
+    })();
+    const interval = setInterval(loadMessages, 4000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [open, ensureWelcome, loadMessages]);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, open]);
+
+  const send = async () => {
+    const value = text.trim();
+    if (!value) return;
+    setText("");
+    await supabase.from("chat_messages").insert({ visitor_id: visitorId, sender: "visitor", text: value });
+    await loadMessages();
+  };
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="fixed bottom-5 right-5 z-50 w-14 h-14 rounded-full flex items-center justify-center"
+        style={{ background: "#C6342A", color: "#ECE3D0", boxShadow: "3px 3px 0 #141210" }}
+        aria-label="Abrir chat"
+      >
+        {open ? <X size={22} /> : <MessageCircle size={22} />}
+      </button>
+
+      {open && (
+        <div
+          className="fixed bottom-24 right-5 z-50 w-80 max-w-[calc(100vw-2.5rem)] flex flex-col"
+          style={{ background: "#1D1A16", border: "1px solid #3A342C", height: 420 }}
+        >
+          <div className="px-4 py-3 border-b" style={{ borderColor: "#3A342C" }}>
+            <div className="font-mono text-xs uppercase tracking-widest" style={{ color: "#8a8378" }}>Fale com a InspirArte</div>
+          </div>
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+            {loading && messages.length === 0 ? (
+              <div className="font-mono text-xs text-center" style={{ color: "#8a8378" }}>Carregando…</div>
+            ) : (
+              messages.map((m) => <ChatBubble key={m.id} text={m.text} fromProducer={m.sender === "producer"} />)
+            )}
+          </div>
+          <div className="p-2 border-t flex gap-2" style={{ borderColor: "#3A342C" }}>
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+              placeholder="Escreva sua mensagem…"
+              className="flex-1 px-3 py-2 text-sm"
+              style={inputStyle}
+            />
+            <button onClick={send} className="px-3" style={{ background: "#C6342A", color: "#ECE3D0" }}>
+              <Send size={16} />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ProducerMessagesView({ onBack }) {
+  const [conversations, setConversations] = useState([]);
+  const [activeVisitorId, setActiveVisitorId] = useState(null);
+  const [thread, setThread] = useState([]);
+  const [reply, setReply] = useState("");
+  const [loadingList, setLoadingList] = useState(true);
+  const scrollRef = useRef(null);
+
+  const loadConversations = useCallback(async () => {
+    const { data, error } = await supabase.from("chat_messages").select("*").order("created_at", { ascending: true });
+    if (!error && data) {
+      const map = new Map();
+      data.forEach((m) => {
+        map.set(m.visitor_id, { visitor_id: m.visitor_id, lastText: m.text, lastAt: m.created_at });
+      });
+      setConversations(Array.from(map.values()).sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt)));
+    }
+    setLoadingList(false);
+  }, []);
+
+  const loadThread = useCallback(async (visitorId) => {
+    const { data, error } = await supabase
+      .from("chat_messages")
+      .select("*")
+      .eq("visitor_id", visitorId)
+      .order("created_at", { ascending: true });
+    if (!error) setThread(data || []);
+  }, []);
+
+  useEffect(() => {
+    loadConversations();
+    const interval = setInterval(loadConversations, 5000);
+    return () => clearInterval(interval);
+  }, [loadConversations]);
+
+  useEffect(() => {
+    if (!activeVisitorId) return;
+    loadThread(activeVisitorId);
+    const interval = setInterval(() => loadThread(activeVisitorId), 4000);
+    return () => clearInterval(interval);
+  }, [activeVisitorId, loadThread]);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [thread]);
+
+  const sendReply = async () => {
+    const value = reply.trim();
+    if (!value || !activeVisitorId) return;
+    setReply("");
+    await supabase.from("chat_messages").insert({ visitor_id: activeVisitorId, sender: "producer", text: value });
+    await loadThread(activeVisitorId);
+    await loadConversations();
+  };
+
+  return (
+    <div>
+      <button onClick={onBack} className="mb-6 font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}>
+        <ArrowLeft size={14} /> voltar
+      </button>
+      <h1 className="font-display text-2xl mb-6">MENSAGENS</h1>
+
+      <div className="grid sm:grid-cols-3 gap-4">
+        <div className="sm:col-span-1" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+          {loadingList ? (
+            <div className="p-4 font-mono text-xs" style={{ color: "#8a8378" }}>Carregando…</div>
+          ) : conversations.length === 0 ? (
+            <div className="p-4 font-mono text-xs" style={{ color: "#8a8378" }}>Nenhuma conversa ainda.</div>
+          ) : (
+            conversations.map((c) => (
+              <button
+                key={c.visitor_id}
+                onClick={() => setActiveVisitorId(c.visitor_id)}
+                className="w-full text-left px-4 py-3 border-b"
+                style={{ borderColor: "#3A342C", background: activeVisitorId === c.visitor_id ? "#141210" : "transparent" }}
+              >
+                <div className="text-sm truncate">Visitante {c.visitor_id.slice(0, 6)}</div>
+                <div className="text-xs truncate" style={{ color: "#8a8378" }}>{c.lastText}</div>
+              </button>
+            ))
+          )}
+        </div>
+
+        <div className="sm:col-span-2 flex flex-col" style={{ background: "#1D1A16", border: "1px solid #3A342C", minHeight: 420 }}>
+          {!activeVisitorId ? (
+            <div className="flex-1 flex items-center justify-center font-mono text-xs" style={{ color: "#8a8378" }}>
+              Selecione uma conversa
+            </div>
+          ) : (
+            <>
+              <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-2" style={{ maxHeight: 360 }}>
+                {thread.map((m) => <ChatBubble key={m.id} text={m.text} fromProducer={m.sender === "producer"} />)}
+              </div>
+              <div className="p-2 border-t flex gap-2" style={{ borderColor: "#3A342C" }}>
+                <input
+                  value={reply}
+                  onChange={(e) => setReply(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") sendReply(); }}
+                  placeholder="Responder…"
+                  className="flex-1 px-3 py-2 text-sm"
+                  style={inputStyle}
+                />
+                <button onClick={sendReply} className="px-3" style={{ background: "#C6342A", color: "#ECE3D0" }}>
+                  <Send size={16} />
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
