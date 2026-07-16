@@ -3,7 +3,7 @@ import {
   Music2, Mic, Play, Pause, Square, Lock, Unlock, CheckCircle2,
   Clock, Send, Settings, LogOut, User, Download, MessageCircle,
   Copy, ChevronRight, Plus, Radio, KeyRound, ArrowLeft, Upload as UploadIcon,
-  Sparkles, X, Trash2
+  Sparkles, X, Trash2, Search, Share2, Star, StickyNote, Archive
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -31,11 +31,23 @@ const INSTRUMENTS = [
 
 const STATUS = {
   enviado: { label: "Enviado", color: "#E3A23D", icon: Clock },
+  sinal_pendente: { label: "Sinal enviado", color: "#E3A23D", icon: KeyRound },
   producao: { label: "Em produção", color: "#E3A23D", icon: Radio },
   previa: { label: "Prévia disponível", color: "#4E9463", icon: Play },
-  aguardando_pgto: { label: "Aguardando pagamento", color: "#C6342A", icon: KeyRound },
+  aguardando_pgto: { label: "Pagamento final", color: "#C6342A", icon: KeyRound },
   liberado: { label: "Liberado", color: "#4E9463", icon: CheckCircle2 },
 };
+
+const STATUS_ORDER = ["enviado", "sinal_pendente", "producao", "previa", "aguardando_pgto", "liberado"];
+
+function getVideoEmbedUrl(url) {
+  if (!url) return null;
+  const yt = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{11})/);
+  if (yt) return `https://www.youtube.com/embed/${yt[1]}`;
+  const vimeo = url.match(/vimeo\.com\/(\d+)/);
+  if (vimeo) return `https://player.vimeo.com/video/${vimeo[1]}`;
+  return null;
+}
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -202,6 +214,42 @@ function StatusPill({ status }) {
   );
 }
 
+function OrderProgress({ status }) {
+  const currentIndex = STATUS_ORDER.indexOf(status);
+  return (
+    <div className="flex items-center mb-6">
+      {STATUS_ORDER.map((s, i) => {
+        const info = STATUS[s];
+        const done = i <= currentIndex;
+        return (
+          <React.Fragment key={s}>
+            <div className="flex flex-col items-center" style={{ minWidth: 0 }}>
+              <div
+                className="w-6 h-6 rounded-full flex items-center justify-center shrink-0"
+                style={{
+                  background: done ? info.color : "transparent",
+                  border: `2px solid ${done ? info.color : "#3A342C"}`,
+                }}
+              >
+                {i < currentIndex && <CheckCircle2 size={13} style={{ color: "#141210" }} />}
+              </div>
+              <span
+                className="mt-1 font-mono text-[9px] uppercase tracking-wide text-center hidden sm:block"
+                style={{ color: done ? info.color : "#8a8378", maxWidth: 70 }}
+              >
+                {info.label}
+              </span>
+            </div>
+            {i < STATUS_ORDER.length - 1 && (
+              <div className="flex-1 h-0.5 mx-1" style={{ background: i < currentIndex ? info.color : "#3A342C" }} />
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
 function Field({ label, children }) {
   return (
     <label className="block mb-4">
@@ -255,7 +303,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [orders, setOrders] = useState([]);
   const [producerAuthed, setProducerAuthed] = useState(false);
-  const [producerSettings, setProducerSettings] = useState({ whatsapp: "", pix: "", password: "", aboutText: "", photos: [], audioExamples: [] });
+  const [producerSettings, setProducerSettings] = useState({ whatsapp: "", pix: "", password: "", aboutText: "", videoUrl: "", videoFile: null, photos: [], audioExamples: [], testimonials: [] });
+  const sharedPreviewId = new URLSearchParams(window.location.search).get("preview");
   const [view, setView] = useState("lista"); // lista | novo | detalhe | config
   const [activeOrderId, setActiveOrderId] = useState(null);
   const [preLoginView, setPreLoginView] = useState("apresentacao"); // apresentacao | login (antes do cliente logar)
@@ -311,8 +360,8 @@ export default function App() {
     await loadOrders();
   };
 
-  const doLogin = (name, email) => {
-    const s = { name, email };
+  const doLogin = (name, email, phone) => {
+    const s = { name, email, phone: phone || "" };
     setSession(s);
     localStorage.setItem("inspirarte_session", JSON.stringify(s));
   };
@@ -328,6 +377,10 @@ export default function App() {
     const { error } = await supabase.from("producer_settings").upsert({ id: 1, data: next });
     if (error) console.error("Erro ao salvar configurações do produtor:", error.message);
   };
+
+  if (sharedPreviewId) {
+    return <SharedPreviewView orderId={sharedPreviewId} />;
+  }
 
   if (loading) {
     return (
@@ -383,7 +436,11 @@ export default function App() {
         {role === "cliente" ? (
           !session ? (
             preLoginView === "apresentacao" ? (
-              <StudioAbout settings={producerSettings} onEnter={() => setPreLoginView("login")} />
+              <StudioAbout
+                settings={producerSettings}
+                totalProduced={orders.filter((o) => o.status === "liberado").length}
+                onEnter={() => setPreLoginView("login")}
+              />
             ) : (
               <ClientLogin onLogin={doLogin} onBack={() => setPreLoginView("apresentacao")} />
             )
@@ -459,10 +516,11 @@ export default function App() {
 /* ---------------------------------------------------------
    Client: apresentação do estúdio (antes do login)
 ---------------------------------------------------------- */
-function StudioAbout({ settings, onEnter }) {
+function StudioAbout({ settings, totalProduced = 0, onEnter }) {
   const photos = settings.photos || [];
   const audioExamples = settings.audioExamples || [];
-  const hasContent = !!settings.aboutText || photos.length > 0 || audioExamples.length > 0;
+  const testimonials = settings.testimonials || [];
+  const hasContent = !!settings.aboutText || !!settings.videoUrl || !!settings.videoFile || photos.length > 0 || audioExamples.length > 0;
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -470,7 +528,33 @@ function StudioAbout({ settings, onEnter }) {
         <img src={LOGO_SRC} alt="InspirArte" className="h-20 w-20 object-contain mx-auto mb-4" />
         <h1 className="font-display text-3xl tracking-wide">CONHEÇA O <span style={{ color: "#C6342A" }}>ESTÚDIO</span></h1>
         <p className="mt-2 text-sm" style={{ color: "#8a8378" }}>Antes de enviar sua música, dá uma olhada em quem vai produzi-la.</p>
+        {totalProduced > 0 && (
+          <div className="inline-flex items-center gap-2 mt-4 px-4 py-2 font-mono text-xs uppercase tracking-widest" style={{ border: "1px solid #4E9463", color: "#4E9463" }}>
+            <Music2 size={14} /> {totalProduced} música{totalProduced === 1 ? "" : "s"} já produzida{totalProduced === 1 ? "" : "s"}
+          </div>
+        )}
       </div>
+
+      {(settings.videoFile || settings.videoUrl) && (
+        <div className="mb-6">
+          <div className="font-mono text-xs uppercase tracking-widest mb-3" style={{ color: "#8a8378" }}>Como funciona o processo</div>
+          <div className="border" style={{ borderColor: "#3A342C", aspectRatio: "16 / 9" }}>
+            {settings.videoFile ? (
+              <video controls src={settings.videoFile} className="w-full h-full" />
+            ) : getVideoEmbedUrl(settings.videoUrl) ? (
+              <iframe
+                src={getVideoEmbedUrl(settings.videoUrl)}
+                className="w-full h-full"
+                allow="autoplay; fullscreen; picture-in-picture"
+                allowFullScreen
+                title="Como funciona o processo"
+              />
+            ) : (
+              <video controls src={settings.videoUrl} className="w-full h-full" />
+            )}
+          </div>
+        </div>
+      )}
 
       {settings.aboutText && (
         <div className="p-6 mb-6" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
@@ -503,6 +587,23 @@ function StudioAbout({ settings, onEnter }) {
         </div>
       )}
 
+      {testimonials.length > 0 && (
+        <div className="mb-8">
+          <div className="font-mono text-xs uppercase tracking-widest mb-3" style={{ color: "#8a8378" }}>O que dizem os clientes</div>
+          <div className="grid sm:grid-cols-2 gap-3">
+            {testimonials.map((t, i) => (
+              <div key={i} className="p-4" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+                <div className="flex gap-0.5 mb-2">
+                  {[0, 1, 2, 3, 4].map((n) => <Star key={n} size={12} fill="#E3A23D" style={{ color: "#E3A23D" }} />)}
+                </div>
+                <p className="text-sm italic mb-2" style={{ color: "#ECE3D0" }}>"{t.text}"</p>
+                <div className="font-mono text-xs" style={{ color: "#8a8378" }}>— {t.name}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {!hasContent && (
         <div className="py-10 text-center border mb-6" style={{ borderColor: "#3A342C" }}>
           <Music2 className="mx-auto mb-3" size={28} style={{ color: "#3A342C" }} />
@@ -521,6 +622,7 @@ function StudioAbout({ settings, onEnter }) {
 function ClientLogin({ onLogin, onBack }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
 
   return (
     <div className="max-w-md mx-auto mt-8">
@@ -534,7 +636,7 @@ function ClientLogin({ onLogin, onBack }) {
         <p className="mt-2 text-sm" style={{ color: "#8a8378" }}>Entre com seu nome e e-mail para enviar sua letra e começar uma produção.</p>
       </div>
       <form
-        onSubmit={(e) => { e.preventDefault(); if (name.trim() && email.trim()) onLogin(name.trim(), email.trim().toLowerCase()); }}
+        onSubmit={(e) => { e.preventDefault(); if (name.trim() && email.trim()) onLogin(name.trim(), email.trim().toLowerCase(), phone.trim()); }}
         className="p-6"
         style={{ background: "#1D1A16", border: "1px solid #3A342C" }}
       >
@@ -543,6 +645,9 @@ function ClientLogin({ onLogin, onBack }) {
         </Field>
         <Field label="Seu e-mail">
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required className="w-full px-3 py-2.5" style={inputStyle} placeholder="voce@email.com" />
+        </Field>
+        <Field label="Seu WhatsApp (opcional, para avisos da produção)">
+          <input value={phone} onChange={(e) => setPhone(e.target.value)} className="w-full px-3 py-2.5" style={inputStyle} placeholder="(00) 00000-0000" />
         </Field>
         <PrimaryButton type="submit" full>Entrar <ChevronRight size={16} /></PrimaryButton>
       </form>
@@ -553,13 +658,38 @@ function ClientLogin({ onLogin, onBack }) {
 /* ---------------------------------------------------------
    Client: order list
 ---------------------------------------------------------- */
-function ClientOrderList({ session, orders, onNew, onOpen, onDelete, onLogout }) {
-  const handleDelete = (e, o) => {
+function OrderCard({ o, i, onOpen, onDelete }) {
+  const handleDelete = (e) => {
     e.stopPropagation();
     if (window.confirm(`Apagar "${o.title || "essa produção"}"? Essa ação não pode ser desfeita.`)) {
       onDelete(o.id);
     }
   };
+  return (
+    <div onClick={() => onOpen(o.id)} className="text-left cursor-pointer relative">
+      <button
+        onClick={handleDelete}
+        title="Apagar esta produção"
+        className="absolute -top-2 -right-2 z-10 w-7 h-7 flex items-center justify-center rounded-full"
+        style={{ background: "#8F2019", color: "#ECE3D0", boxShadow: "2px 2px 0 #141210" }}
+      >
+        <Trash2 size={14} />
+      </button>
+      <TapeLabel rotate={i % 2 === 0 ? -1 : 1}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="font-mono text-[10px] tracking-widest" style={{ color: "#8a8378" }}>FAIXA #{o.id.slice(-4).toUpperCase()}</span>
+          <StatusPill status={o.status} />
+        </div>
+        <div className="font-display text-lg" style={{ color: "#141210" }}>{o.title || "Sem título"}</div>
+        <div className="text-xs mt-1" style={{ color: "#5c564b" }}>{o.genre} · {o.instruments.join(", ")}</div>
+      </TapeLabel>
+    </div>
+  );
+}
+
+function ClientOrderList({ session, orders, onNew, onOpen, onDelete, onLogout }) {
+  const active = orders.filter((o) => o.status !== "liberado");
+  const done = orders.filter((o) => o.status === "liberado");
 
   return (
     <div>
@@ -583,28 +713,24 @@ function ClientOrderList({ session, orders, onNew, onOpen, onDelete, onLogout })
           <p className="font-mono text-sm" style={{ color: "#8a8378" }}>Nenhuma produção enviada ainda.</p>
         </div>
       ) : (
-        <div className="grid sm:grid-cols-2 gap-6">
-          {orders.map((o, i) => (
-            <div key={o.id} onClick={() => onOpen(o.id)} className="text-left cursor-pointer relative">
-              <button
-                onClick={(e) => handleDelete(e, o)}
-                title="Apagar esta produção"
-                className="absolute -top-2 -right-2 z-10 w-7 h-7 flex items-center justify-center rounded-full"
-                style={{ background: "#8F2019", color: "#ECE3D0", boxShadow: "2px 2px 0 #141210" }}
-              >
-                <Trash2 size={14} />
-              </button>
-              <TapeLabel rotate={i % 2 === 0 ? -1 : 1}>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-mono text-[10px] tracking-widest" style={{ color: "#8a8378" }}>FAIXA #{o.id.slice(-4).toUpperCase()}</span>
-                  <StatusPill status={o.status} />
-                </div>
-                <div className="font-display text-lg" style={{ color: "#141210" }}>{o.title || "Sem título"}</div>
-                <div className="text-xs mt-1" style={{ color: "#5c564b" }}>{o.genre} · {o.instruments.join(", ")}</div>
-              </TapeLabel>
+        <>
+          {active.length > 0 && (
+            <div className="mb-8">
+              <div className="font-mono text-xs uppercase tracking-widest mb-3" style={{ color: "#8a8378" }}>Em andamento</div>
+              <div className="grid sm:grid-cols-2 gap-6">
+                {active.map((o, i) => <OrderCard key={o.id} o={o} i={i} onOpen={onOpen} onDelete={onDelete} />)}
+              </div>
             </div>
-          ))}
-        </div>
+          )}
+          {done.length > 0 && (
+            <div>
+              <div className="font-mono text-xs uppercase tracking-widest mb-3 flex items-center gap-1.5" style={{ color: "#8a8378" }}><Archive size={13} /> Concluídas</div>
+              <div className="grid sm:grid-cols-2 gap-6">
+                {done.map((o, i) => <OrderCard key={o.id} o={o} i={i} onOpen={onOpen} onDelete={onDelete} />)}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -637,6 +763,7 @@ function NewOrderWizard({ session, onCancel, onSubmit }) {
       id: uid(),
       clientEmail: session.email,
       clientName: session.name,
+      clientPhone: session.phone || "",
       title: title.trim() || "Sem título",
       lyrics,
       genre,
@@ -644,11 +771,14 @@ function NewOrderWizard({ session, onCancel, onSubmit }) {
       bpm: met.bpm,
       refAudio: rec.audioBase64,
       status: "enviado",
+      downPaymentProof: null,
+      downPaymentConfirmed: false,
       previewAudio: null,
       previewUnlocked: false,
       paymentProof: null,
       paymentConfirmed: false,
       finalAudio: null,
+      notes: "",
       createdAt: Date.now(),
     };
     await onSubmit(order);
@@ -809,11 +939,37 @@ function NewOrderWizard({ session, onCancel, onSubmit }) {
    Client: order detail
 ---------------------------------------------------------- */
 function ClientOrderDetail({ order, producerSettings, onBack, onUpdate, onDelete }) {
+  const [downProofText, setDownProofText] = useState(order.downPaymentProof || "");
   const [proofText, setProofText] = useState(order.paymentProof || "");
   const [showPay, setShowPay] = useState(false);
+  const [shareMsg, setShareMsg] = useState("");
+
+  const sendDownProof = async () => {
+    await onUpdate({ ...order, downPaymentProof: downProofText, status: "sinal_pendente" });
+  };
 
   const sendProof = async () => {
     await onUpdate({ ...order, paymentProof: proofText, status: "aguardando_pgto" });
+  };
+
+  const sharePreview = async () => {
+    const url = `${window.location.origin}${window.location.pathname}?preview=${order.id}`;
+    const shareData = {
+      title: "InspirArte — prévia da minha música",
+      text: `Ouve a prévia da minha música "${order.title}"!`,
+      url,
+    };
+    if (navigator.share) {
+      try {
+        await navigator.share(shareData);
+      } catch {
+        /* usuário cancelou o compartilhamento */
+      }
+    } else if (navigator.clipboard) {
+      await navigator.clipboard.writeText(url);
+      setShareMsg("Link copiado! Cole onde quiser compartilhar.");
+      setTimeout(() => setShareMsg(""), 2500);
+    }
   };
 
   const handleDelete = () => {
@@ -833,10 +989,12 @@ function ClientOrderDetail({ order, producerSettings, onBack, onUpdate, onDelete
         </button>
       </div>
 
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-4">
         <h1 className="font-display text-2xl">{order.title}</h1>
         <StatusPill status={order.status} />
       </div>
+
+      <OrderProgress status={order.status} />
 
       <div className="p-5 mb-6" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
         <div className="grid sm:grid-cols-2 gap-3 text-sm mb-4">
@@ -847,7 +1005,29 @@ function ClientOrderDetail({ order, producerSettings, onBack, onUpdate, onDelete
         {order.refAudio && <audio controls src={order.refAudio} className="w-full" />}
       </div>
 
-      {order.status === "enviado" || order.status === "producao" ? (
+      {order.status === "enviado" ? (
+        <div className="p-6" style={{ background: "#1D1A16", border: "1px solid #E3A23D" }}>
+          <div className="flex items-center gap-2 mb-3">
+            <KeyRound size={18} style={{ color: "#E3A23D" }} />
+            <div className="font-mono text-xs uppercase tracking-widest" style={{ color: "#E3A23D" }}>Sinal de 50% necessário</div>
+          </div>
+          <p className="text-sm mb-4">Para darmos início à produção da sua música, é necessário o pagamento de <strong>50% do valor combinado</strong>. Assim que confirmarmos, sua música entra na fila de produção.</p>
+          <div className="space-y-2 text-sm mb-4">
+            <div className="flex items-center gap-2"><MessageCircle size={14} style={{ color: "#4E9463" }} /> WhatsApp: {producerSettings.whatsapp || "não configurado"}</div>
+            <div className="flex items-center gap-2"><KeyRound size={14} style={{ color: "#C6342A" }} /> Chave Pix: {producerSettings.pix || "não configurada"}</div>
+          </div>
+          <Field label="Após pagar o sinal, cole aqui o comprovante (texto, link ou ID da transação)">
+            <textarea value={downProofText} onChange={(e) => setDownProofText(e.target.value)} rows={3} className="w-full px-3 py-2.5" style={inputStyle} placeholder="Ex: Comprovante Pix às 14:32, valor R$75,00…" />
+          </Field>
+          <PrimaryButton onClick={sendDownProof} disabled={!downProofText.trim()}><Send size={16} /> Enviar comprovante do sinal</PrimaryButton>
+        </div>
+      ) : order.status === "sinal_pendente" ? (
+        <div className="p-6 text-center border" style={{ borderColor: "#E3A23D" }}>
+          <Clock className="mx-auto mb-3" size={24} style={{ color: "#E3A23D" }} />
+          <p className="font-mono text-sm">Comprovante do sinal enviado — aguardando confirmação do produtor.</p>
+          <p className="text-xs mt-1" style={{ color: "#8a8378" }}>Assim que confirmarmos, sua música entra na fila de produção.</p>
+        </div>
+      ) : order.status === "producao" ? (
         <div className="p-6 text-center border" style={{ borderColor: "#3A342C" }}>
           <Radio className="mx-auto mb-3" size={24} style={{ color: "#E3A23D" }} />
           <p className="font-mono text-sm">Sua música está na fila de produção.</p>
@@ -859,11 +1039,16 @@ function ClientOrderDetail({ order, producerSettings, onBack, onUpdate, onDelete
             <div className="p-5" style={{ background: "#1D1A16", border: "1px solid #4E9463" }}>
               <div className="font-mono text-xs uppercase tracking-widest mb-2" style={{ color: "#4E9463" }}>Prévia disponível</div>
               <audio controls src={order.previewAudio} className="w-full mb-4" />
-              {!order.paymentConfirmed && (
-                <PrimaryButton onClick={() => setShowPay((s) => !s)}>
-                  <Sparkles size={16} /> Gostei! Quero liberar a música
-                </PrimaryButton>
-              )}
+              <div className="flex flex-wrap items-center gap-3">
+                {!order.paymentConfirmed && (
+                  <PrimaryButton onClick={() => setShowPay((s) => !s)}>
+                    <Sparkles size={16} /> Gostei! Quero liberar a música
+                  </PrimaryButton>
+                )}
+                <GhostButton onClick={sharePreview}><Share2 size={14} /> Compartilhar prévia</GhostButton>
+              </div>
+              {shareMsg && <div className="mt-2 text-xs" style={{ color: "#4E9463" }}>{shareMsg}</div>}
+              <div className="mt-2 text-xs" style={{ color: "#8a8378" }}>Quem receber o link só consegue ouvir a prévia — sem baixar e sem acessar o resto do pedido.</div>
             </div>
           )}
 
@@ -899,6 +1084,58 @@ function ClientOrderDetail({ order, producerSettings, onBack, onUpdate, onDelete
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Public: shared preview (link enviado pelo cliente, sem login)
+---------------------------------------------------------- */
+function SharedPreviewView({ orderId }) {
+  const [state, setState] = useState("loading"); // loading | notfound | locked | ok
+  const [order, setOrder] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data, error } = await supabase.from("orders").select("data").eq("id", orderId).maybeSingle();
+        if (error || !data?.data) {
+          setState("notfound");
+          return;
+        }
+        const o = data.data;
+        if (!o.previewUnlocked || !o.previewAudio) {
+          setState("locked");
+          return;
+        }
+        setOrder(o);
+        setState("ok");
+      } catch {
+        setState("notfound");
+      }
+    })();
+  }, [orderId]);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-5" style={{ background: "#141210", color: "#ECE3D0", fontFamily: "'Inter', sans-serif" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+        .font-display { font-family: 'Anton', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+      `}</style>
+      <div className="max-w-md w-full text-center">
+        <img src={LOGO_SRC} alt="InspirArte" className="h-16 w-16 object-contain mx-auto mb-5" />
+        {state === "loading" && <div className="font-mono text-sm" style={{ color: "#8a8378" }}>Carregando prévia…</div>}
+        {state === "notfound" && <div className="font-mono text-sm" style={{ color: "#8a8378" }}>Prévia não encontrada. O link pode estar incorreto.</div>}
+        {state === "locked" && <div className="font-mono text-sm" style={{ color: "#8a8378" }}>Essa prévia ainda não está disponível para audição pública.</div>}
+        {state === "ok" && order && (
+          <div className="p-6 text-left" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+            <div className="font-mono text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8a8378" }}>Prévia — InspirArte</div>
+            <h1 className="font-display text-xl mb-4">{order.title}</h1>
+            <audio controls src={order.previewAudio} className="w-full" />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -949,12 +1186,21 @@ function ProducerLogin({ hasPassword, onAuth }) {
    Producer: dashboard
 ---------------------------------------------------------- */
 function ProducerDashboard({ orders, onOpen, onDelete, onConfig, onLogout }) {
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("todos");
+
   const handleDelete = (e, o) => {
     e.stopPropagation();
     if (window.confirm(`Apagar o pedido "${o.title}" de ${o.clientName}? Essa ação não pode ser desfeita.`)) {
       onDelete(o.id);
     }
   };
+
+  const filtered = orders.filter((o) => {
+    const matchesSearch = !search.trim() || `${o.clientName} ${o.title}`.toLowerCase().includes(search.trim().toLowerCase());
+    const matchesStatus = statusFilter === "todos" || o.status === statusFilter;
+    return matchesSearch && matchesStatus;
+  });
 
   return (
     <div>
@@ -969,14 +1215,45 @@ function ProducerDashboard({ orders, onOpen, onDelete, onConfig, onLogout }) {
         </div>
       </div>
 
+      {orders.length > 0 && (
+        <div className="flex flex-col sm:flex-row gap-3 mb-6">
+          <div className="relative flex-1">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "#8a8378" }} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar por cliente ou título…"
+              className="w-full pl-9 pr-3 py-2.5 text-sm"
+              style={inputStyle}
+            />
+          </div>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="px-3 py-2.5 text-sm"
+            style={inputStyle}
+          >
+            <option value="todos">Todos os status</option>
+            {STATUS_ORDER.map((s) => (
+              <option key={s} value={s}>{STATUS[s].label}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {orders.length === 0 ? (
         <div className="py-16 text-center border" style={{ borderColor: "#3A342C" }}>
           <Music2 className="mx-auto mb-3" size={28} style={{ color: "#3A342C" }} />
           <p className="font-mono text-sm" style={{ color: "#8a8378" }}>Nenhum pedido recebido ainda.</p>
         </div>
+      ) : filtered.length === 0 ? (
+        <div className="py-16 text-center border" style={{ borderColor: "#3A342C" }}>
+          <Search className="mx-auto mb-3" size={28} style={{ color: "#3A342C" }} />
+          <p className="font-mono text-sm" style={{ color: "#8a8378" }}>Nenhum pedido encontrado com esse filtro.</p>
+        </div>
       ) : (
         <div className="grid sm:grid-cols-2 gap-6">
-          {orders.map((o, i) => (
+          {filtered.map((o, i) => (
             <div key={o.id} onClick={() => onOpen(o.id)} className="text-left cursor-pointer relative">
               <button
                 onClick={(e) => handleDelete(e, o)}
@@ -1008,6 +1285,8 @@ function ProducerDashboard({ orders, onOpen, onDelete, onConfig, onLogout }) {
 function ProducerOrderDetail({ order, onBack, onUpdate, onDelete }) {
   const previewInputRef = useRef(null);
   const finalInputRef = useRef(null);
+  const [notes, setNotes] = useState(order.notes || "");
+  const [notesSaved, setNotesSaved] = useState(false);
 
   const handleDelete = () => {
     if (window.confirm(`Apagar o pedido "${order.title}" de ${order.clientName}? Essa ação não pode ser desfeita.`)) {
@@ -1028,8 +1307,30 @@ function ProducerOrderDetail({ order, onBack, onUpdate, onDelete }) {
     await onUpdate({ ...order, previewUnlocked: !order.previewUnlocked });
   };
 
+  const confirmDownPayment = async () => {
+    await onUpdate({ ...order, downPaymentConfirmed: true, status: "producao" });
+  };
+
   const confirmPayment = async () => {
     await onUpdate({ ...order, paymentConfirmed: true, status: "liberado" });
+  };
+
+  const saveNotes = async () => {
+    await onUpdate({ ...order, notes });
+    setNotesSaved(true);
+    setTimeout(() => setNotesSaved(false), 2000);
+  };
+
+  const notifyWhatsapp = () => {
+    const phone = (order.clientPhone || "").replace(/\D/g, "");
+    const msg = encodeURIComponent(`Olá, ${order.clientName}! A prévia da sua música "${order.title}" já está pronta na InspirArte. Entre no app para ouvir. 🎵`);
+    window.open(`https://wa.me/${phone}?text=${msg}`, "_blank");
+  };
+
+  const notifyEmail = () => {
+    const subject = encodeURIComponent(`Sua prévia está pronta — ${order.title}`);
+    const body = encodeURIComponent(`Olá, ${order.clientName}!\n\nA prévia da sua música "${order.title}" já está disponível na InspirArte. Entre no app com seu e-mail para ouvir.\n\nAté já!`);
+    window.location.href = `mailto:${order.clientEmail}?subject=${subject}&body=${body}`;
   };
 
   return (
@@ -1043,13 +1344,27 @@ function ProducerOrderDetail({ order, onBack, onUpdate, onDelete }) {
         </button>
       </div>
 
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="font-display text-2xl">{order.title}</h1>
           <div className="text-sm" style={{ color: "#8a8378" }}>{order.clientName} · {order.clientEmail}</div>
         </div>
         <StatusPill status={order.status} />
       </div>
+
+      <OrderProgress status={order.status} />
+
+      {order.downPaymentProof && (
+        <div className="p-5 mb-5" style={{ background: "#1D1A16", border: `1px solid ${order.downPaymentConfirmed ? "#4E9463" : "#E3A23D"}` }}>
+          <div className="font-mono text-xs uppercase tracking-widest mb-2" style={{ color: order.downPaymentConfirmed ? "#4E9463" : "#E3A23D" }}>Comprovante do sinal (50%)</div>
+          <div className="text-sm mb-4">{order.downPaymentProof}</div>
+          {!order.downPaymentConfirmed ? (
+            <PrimaryButton onClick={confirmDownPayment}><CheckCircle2 size={16} /> Confirmar sinal e iniciar produção</PrimaryButton>
+          ) : (
+            <div className="flex items-center gap-2 text-sm" style={{ color: "#4E9463" }}><CheckCircle2 size={16} /> Sinal confirmado — produção iniciada</div>
+          )}
+        </div>
+      )}
 
       <div className="p-5 mb-5" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
         <div className="grid sm:grid-cols-3 gap-3 text-sm mb-4">
@@ -1076,6 +1391,34 @@ function ProducerOrderDetail({ order, onBack, onUpdate, onDelete }) {
         {order.previewAudio && <audio controls src={order.previewAudio} className="w-full mb-3" />}
         <input ref={previewInputRef} type="file" accept="audio/*" className="hidden" onChange={(e) => handleFileUpload(e, "previewAudio")} />
         <GhostButton onClick={() => previewInputRef.current?.click()}><UploadIcon size={14} /> {order.previewAudio ? "Substituir prévia" : "Enviar prévia"}</GhostButton>
+
+        {order.previewAudio && (
+          <div className="mt-4 pt-4" style={{ borderTop: "1px solid #3A342C" }}>
+            <div className="font-mono text-xs uppercase tracking-widest mb-2" style={{ color: "#8a8378" }}>Avisar cliente que a prévia chegou</div>
+            <div className="flex flex-wrap gap-2">
+              <GhostButton onClick={notifyWhatsapp} disabled={!order.clientPhone}>
+                <MessageCircle size={14} /> {order.clientPhone ? "Notificar por WhatsApp" : "Cliente sem WhatsApp"}
+              </GhostButton>
+              <GhostButton onClick={notifyEmail}><Send size={14} /> Notificar por e-mail</GhostButton>
+            </div>
+            <div className="mt-2 text-xs" style={{ color: "#8a8378" }}>Abre o WhatsApp ou seu app de e-mail com a mensagem já pronta para você enviar.</div>
+          </div>
+        )}
+      </div>
+
+      <div className="p-5 mb-5" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+        <div className="flex items-center gap-1.5 font-mono text-xs uppercase tracking-widest mb-3" style={{ color: "#8a8378" }}>
+          <StickyNote size={13} /> Notas internas (só o produtor vê)
+        </div>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={3}
+          className="w-full px-3 py-2.5 text-sm mb-3"
+          style={inputStyle}
+          placeholder="Ex: cliente pediu mais reverb no vocal, prefere versão acústica…"
+        />
+        <GhostButton onClick={saveNotes}>{notesSaved ? <><CheckCircle2 size={14} /> Salvo!</> : <>Salvar notas</>}</GhostButton>
       </div>
 
       {order.paymentProof && (
@@ -1109,17 +1452,56 @@ function ProducerSettingsView({ settings, onSave, onBack }) {
   const [whatsapp, setWhatsapp] = useState(settings.whatsapp || "");
   const [pix, setPix] = useState(settings.pix || "");
   const [aboutText, setAboutText] = useState(settings.aboutText || "");
+  const [videoUrl, setVideoUrl] = useState(settings.videoUrl || "");
+  const [videoFile, setVideoFile] = useState(settings.videoFile || null);
+  const [videoFileName, setVideoFileName] = useState("");
+  const [uploadingVideo, setUploadingVideo] = useState(false);
   const [photos, setPhotos] = useState(settings.photos || []);
   const [audioExamples, setAudioExamples] = useState(settings.audioExamples || []);
   const [newExampleTitle, setNewExampleTitle] = useState("");
+  const [testimonials, setTestimonials] = useState(settings.testimonials || []);
+  const [newTestName, setNewTestName] = useState("");
+  const [newTestText, setNewTestText] = useState("");
   const [saved, setSaved] = useState(false);
   const photoInputRef = useRef(null);
   const audioInputRef = useRef(null);
+  const videoInputRef = useRef(null);
 
   const save = async () => {
-    await onSave({ ...settings, whatsapp, pix, aboutText, photos, audioExamples });
+    await onSave({ ...settings, whatsapp, pix, aboutText, videoUrl, videoFile, photos, audioExamples, testimonials });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const pickVideoFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingVideo(true);
+    try {
+      const b64 = await blobToBase64(file);
+      setVideoFile(b64);
+      setVideoFileName(file.name);
+      setVideoUrl(""); // upload e link são alternativos — o arquivo tem prioridade
+    } finally {
+      setUploadingVideo(false);
+      e.target.value = "";
+    }
+  };
+
+  const removeVideoFile = () => {
+    setVideoFile(null);
+    setVideoFileName("");
+  };
+
+  const addTestimonial = () => {
+    if (!newTestName.trim() || !newTestText.trim()) return;
+    setTestimonials((prev) => [...prev, { name: newTestName.trim(), text: newTestText.trim() }]);
+    setNewTestName("");
+    setNewTestText("");
+  };
+
+  const removeTestimonial = (i) => {
+    setTestimonials((prev) => prev.filter((_, idx) => idx !== i));
   };
 
   const addPhotos = async (e) => {
@@ -1173,9 +1555,38 @@ function ProducerSettingsView({ settings, onSave, onBack }) {
       <h1 className="font-display text-2xl mb-2">APRESENTAÇÃO DO ESTÚDIO</h1>
       <p className="text-xs mb-6" style={{ color: "#8a8378" }}>Isso aparece para o cliente antes de ele fazer login.</p>
       <div className="p-6 mb-8" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
-        <Field label="Texto sobre o estúdio">
+        <Field label="Texto sobre o estúdio (opcional se você usar o vídeo abaixo)">
           <textarea value={aboutText} onChange={(e) => setAboutText(e.target.value)} rows={5} className="w-full px-3 py-2.5" style={inputStyle} placeholder="Conte um pouco sobre você, sua experiência e o estúdio…" />
         </Field>
+
+        <div className="mb-5">
+          <span className="block mb-1.5 text-xs font-mono uppercase tracking-widest" style={{ color: "#8a8378" }}>Vídeo explicando como funciona o processo</span>
+          <p className="text-xs mb-3" style={{ color: "#8a8378" }}>Use um link (YouTube, Vimeo etc.) OU envie o arquivo de vídeo diretamente — o que você preencher por último é o que vale.</p>
+
+          {videoFile && (
+            <div className="p-3 mb-3 flex items-center justify-between gap-2" style={{ background: "#141210", border: "1px solid #4E9463" }}>
+              <span className="text-sm truncate">{videoFileName || "Vídeo enviado"}</span>
+              <button onClick={removeVideoFile} style={{ color: "#C6342A" }}><Trash2 size={14} /></button>
+            </div>
+          )}
+
+          <Field label="Link do vídeo">
+            <input
+              value={videoUrl}
+              onChange={(e) => { setVideoUrl(e.target.value); if (e.target.value) { setVideoFile(null); setVideoFileName(""); } }}
+              className="w-full px-3 py-2.5"
+              style={inputStyle}
+              placeholder="https://youtube.com/watch?v=…"
+              disabled={!!videoFile}
+            />
+          </Field>
+
+          <input ref={videoInputRef} type="file" accept="video/*" className="hidden" onChange={pickVideoFile} />
+          <GhostButton onClick={() => videoInputRef.current?.click()} disabled={uploadingVideo}>
+            <UploadIcon size={14} /> {uploadingVideo ? "Enviando…" : videoFile ? "Substituir vídeo enviado" : "Ou enviar arquivo de vídeo"}
+          </GhostButton>
+          <p className="text-xs mt-2" style={{ color: "#8a8378" }}>Prefira vídeos curtos (até 1-2 minutos) e bem comprimidos — arquivos muito grandes podem demorar para carregar para o cliente.</p>
+        </div>
 
         <div className="mb-5">
           <span className="block mb-1.5 text-xs font-mono uppercase tracking-widest" style={{ color: "#8a8378" }}>Fotos do estúdio</span>
@@ -1217,6 +1628,31 @@ function ProducerSettingsView({ settings, onSave, onBack }) {
           </div>
           <input ref={audioInputRef} type="file" accept="audio/*" className="hidden" onChange={addAudioExample} />
         </div>
+      </div>
+
+      <h1 className="font-display text-2xl mb-2">DEPOIMENTOS</h1>
+      <p className="text-xs mb-6" style={{ color: "#8a8378" }}>Aparecem para o cliente na página inicial, antes do login.</p>
+      <div className="p-6 mb-8" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+        {testimonials.length > 0 && (
+          <div className="space-y-2 mb-4">
+            {testimonials.map((t, i) => (
+              <div key={i} className="p-3 flex items-start justify-between gap-2" style={{ background: "#141210", border: "1px solid #3A342C" }}>
+                <div className="text-sm">
+                  <div className="italic mb-1">"{t.text}"</div>
+                  <div className="font-mono text-xs" style={{ color: "#8a8378" }}>— {t.name}</div>
+                </div>
+                <button onClick={() => removeTestimonial(i)} style={{ color: "#C6342A" }}><Trash2 size={14} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+        <Field label="Nome do cliente">
+          <input value={newTestName} onChange={(e) => setNewTestName(e.target.value)} className="w-full px-3 py-2.5" style={inputStyle} placeholder="Ex: Carla Mendes" />
+        </Field>
+        <Field label="Depoimento">
+          <textarea value={newTestText} onChange={(e) => setNewTestText(e.target.value)} rows={2} className="w-full px-3 py-2.5" style={inputStyle} placeholder="Ex: Adorei o resultado, superou minhas expectativas!" />
+        </Field>
+        <GhostButton onClick={addTestimonial}><Plus size={14} /> Adicionar depoimento</GhostButton>
       </div>
 
       <PrimaryButton onClick={save} full>{saved ? <><CheckCircle2 size={16} /> Salvo!</> : "Salvar tudo"}</PrimaryButton>
