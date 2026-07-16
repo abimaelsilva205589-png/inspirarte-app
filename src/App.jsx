@@ -3,7 +3,7 @@ import {
   Music2, Mic, Play, Pause, Square, Lock, Unlock, CheckCircle2,
   Clock, Send, Settings, LogOut, User, Download, MessageCircle,
   Copy, ChevronRight, Plus, Radio, KeyRound, ArrowLeft, Upload as UploadIcon,
-  Sparkles, X
+  Sparkles, X, Trash2
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -106,8 +106,10 @@ function useRecorder() {
   const start = async () => {
     setError(null);
     try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
+      // Escolhe um formato realmente suportado pelo navegador atual
+      // (Safari/iOS não suporta webm; costuma usar mp4/aac)
       const preferredTypes = [
         "audio/webm;codecs=opus",
         "audio/webm",
@@ -122,6 +124,7 @@ function useRecorder() {
       chunksRef.current = [];
       mr.ondataavailable = (e) => chunksRef.current.push(e.data);
       mr.onstop = async () => {
+        // Usa o mimeType que o MediaRecorder de fato usou, não um valor fixo
         const actualType = mr.mimeType || "audio/webm";
         const blob = new Blob(chunksRef.current, { type: actualType });
         setAudioUrl(URL.createObjectURL(blob));
@@ -252,9 +255,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [orders, setOrders] = useState([]);
   const [producerAuthed, setProducerAuthed] = useState(false);
-  const [producerSettings, setProducerSettings] = useState({ whatsapp: "", pix: "", password: "" });
+  const [producerSettings, setProducerSettings] = useState({ whatsapp: "", pix: "", password: "", aboutText: "", photos: [], audioExamples: [] });
   const [view, setView] = useState("lista"); // lista | novo | detalhe | config
   const [activeOrderId, setActiveOrderId] = useState(null);
+  const [preLoginView, setPreLoginView] = useState("apresentacao"); // apresentacao | login (antes do cliente logar)
 
   const loadOrders = useCallback(async () => {
     try {
@@ -294,6 +298,16 @@ export default function App() {
   const saveOrder = async (order) => {
     const { error } = await supabase.from("orders").upsert({ id: order.id, data: order });
     if (error) console.error("Erro ao salvar pedido:", error.message);
+    await loadOrders();
+  };
+
+  const deleteOrder = async (id) => {
+    const { error } = await supabase.from("orders").delete().eq("id", id);
+    if (error) console.error("Erro ao apagar pedido:", error.message);
+    if (activeOrderId === id) {
+      setActiveOrderId(null);
+      setView("lista");
+    }
     await loadOrders();
   };
 
@@ -368,7 +382,11 @@ export default function App() {
       <main className="max-w-5xl mx-auto px-5 py-8">
         {role === "cliente" ? (
           !session ? (
-            <ClientLogin onLogin={doLogin} />
+            preLoginView === "apresentacao" ? (
+              <StudioAbout settings={producerSettings} onEnter={() => setPreLoginView("login")} />
+            ) : (
+              <ClientLogin onLogin={doLogin} onBack={() => setPreLoginView("apresentacao")} />
+            )
           ) : view === "novo" ? (
             <NewOrderWizard
               session={session}
@@ -384,6 +402,7 @@ export default function App() {
               producerSettings={producerSettings}
               onBack={() => setView("lista")}
               onUpdate={saveOrder}
+              onDelete={deleteOrder}
             />
           ) : (
             <ClientOrderList
@@ -391,6 +410,7 @@ export default function App() {
               orders={clientOrders}
               onNew={() => setView("novo")}
               onOpen={(id) => { setActiveOrderId(id); setView("detalhe"); }}
+              onDelete={deleteOrder}
               onLogout={doLogout}
             />
           )
@@ -414,6 +434,7 @@ export default function App() {
             order={activeOrder}
             onBack={() => setView("lista")}
             onUpdate={saveOrder}
+            onDelete={deleteOrder}
           />
         ) : view === "config" ? (
           <ProducerSettingsView
@@ -425,6 +446,7 @@ export default function App() {
           <ProducerDashboard
             orders={orders}
             onOpen={(id) => { setActiveOrderId(id); setView("detalhe"); }}
+            onDelete={deleteOrder}
             onConfig={() => setView("config")}
             onLogout={() => setProducerAuthed(false)}
           />
@@ -435,14 +457,78 @@ export default function App() {
 }
 
 /* ---------------------------------------------------------
+   Client: apresentação do estúdio (antes do login)
+---------------------------------------------------------- */
+function StudioAbout({ settings, onEnter }) {
+  const photos = settings.photos || [];
+  const audioExamples = settings.audioExamples || [];
+  const hasContent = !!settings.aboutText || photos.length > 0 || audioExamples.length > 0;
+
+  return (
+    <div className="max-w-2xl mx-auto">
+      <div className="mb-8 text-center">
+        <img src={LOGO_SRC} alt="InspirArte" className="h-20 w-20 object-contain mx-auto mb-4" />
+        <h1 className="font-display text-3xl tracking-wide">CONHEÇA O <span style={{ color: "#C6342A" }}>ESTÚDIO</span></h1>
+        <p className="mt-2 text-sm" style={{ color: "#8a8378" }}>Antes de enviar sua música, dá uma olhada em quem vai produzi-la.</p>
+      </div>
+
+      {settings.aboutText && (
+        <div className="p-6 mb-6" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+          <p className="text-sm whitespace-pre-wrap leading-relaxed">{settings.aboutText}</p>
+        </div>
+      )}
+
+      {photos.length > 0 && (
+        <div className="mb-6">
+          <div className="font-mono text-xs uppercase tracking-widest mb-3" style={{ color: "#8a8378" }}>Fotos do estúdio</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {photos.map((src, i) => (
+              <img key={i} src={src} alt={`Foto do estúdio ${i + 1}`} className="w-full h-28 object-cover border" style={{ borderColor: "#3A342C" }} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {audioExamples.length > 0 && (
+        <div className="mb-8">
+          <div className="font-mono text-xs uppercase tracking-widest mb-3" style={{ color: "#8a8378" }}>Exemplos de produções</div>
+          <div className="space-y-3">
+            {audioExamples.map((ex, i) => (
+              <div key={i} className="p-4" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+                <div className="text-sm font-medium mb-2">{ex.title || `Exemplo ${i + 1}`}</div>
+                <audio controls src={ex.audio} className="w-full" />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!hasContent && (
+        <div className="py-10 text-center border mb-6" style={{ borderColor: "#3A342C" }}>
+          <Music2 className="mx-auto mb-3" size={28} style={{ color: "#3A342C" }} />
+          <p className="font-mono text-sm" style={{ color: "#8a8378" }}>Em breve, mais sobre o estúdio por aqui.</p>
+        </div>
+      )}
+
+      <PrimaryButton onClick={onEnter} full>Entrar e enviar minha música <ChevronRight size={16} /></PrimaryButton>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
    Client: login
 ---------------------------------------------------------- */
-function ClientLogin({ onLogin }) {
+function ClientLogin({ onLogin, onBack }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
 
   return (
     <div className="max-w-md mx-auto mt-8">
+      {onBack && (
+        <button onClick={onBack} className="mb-6 font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}>
+          <ArrowLeft size={14} /> conhecer o estúdio
+        </button>
+      )}
       <div className="mb-8 text-center">
         <h1 className="font-display text-3xl tracking-wide">SUA MÚSICA, <span style={{ color: "#C6342A" }}>PRODUZIDA</span></h1>
         <p className="mt-2 text-sm" style={{ color: "#8a8378" }}>Entre com seu nome e e-mail para enviar sua letra e começar uma produção.</p>
@@ -467,7 +553,14 @@ function ClientLogin({ onLogin }) {
 /* ---------------------------------------------------------
    Client: order list
 ---------------------------------------------------------- */
-function ClientOrderList({ session, orders, onNew, onOpen, onLogout }) {
+function ClientOrderList({ session, orders, onNew, onOpen, onDelete, onLogout }) {
+  const handleDelete = (e, o) => {
+    e.stopPropagation();
+    if (window.confirm(`Apagar "${o.title || "essa produção"}"? Essa ação não pode ser desfeita.`)) {
+      onDelete(o.id);
+    }
+  };
+
   return (
     <div>
       <div className="flex items-start justify-between mb-8">
@@ -492,7 +585,15 @@ function ClientOrderList({ session, orders, onNew, onOpen, onLogout }) {
       ) : (
         <div className="grid sm:grid-cols-2 gap-6">
           {orders.map((o, i) => (
-            <button key={o.id} onClick={() => onOpen(o.id)} className="text-left">
+            <div key={o.id} onClick={() => onOpen(o.id)} className="text-left cursor-pointer relative">
+              <button
+                onClick={(e) => handleDelete(e, o)}
+                title="Apagar esta produção"
+                className="absolute -top-2 -right-2 z-10 w-7 h-7 flex items-center justify-center rounded-full"
+                style={{ background: "#8F2019", color: "#ECE3D0", boxShadow: "2px 2px 0 #141210" }}
+              >
+                <Trash2 size={14} />
+              </button>
               <TapeLabel rotate={i % 2 === 0 ? -1 : 1}>
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-mono text-[10px] tracking-widest" style={{ color: "#8a8378" }}>FAIXA #{o.id.slice(-4).toUpperCase()}</span>
@@ -501,7 +602,7 @@ function ClientOrderList({ session, orders, onNew, onOpen, onLogout }) {
                 <div className="font-display text-lg" style={{ color: "#141210" }}>{o.title || "Sem título"}</div>
                 <div className="text-xs mt-1" style={{ color: "#5c564b" }}>{o.genre} · {o.instruments.join(", ")}</div>
               </TapeLabel>
-            </button>
+            </div>
           ))}
         </div>
       )}
@@ -707,7 +808,7 @@ function NewOrderWizard({ session, onCancel, onSubmit }) {
 /* ---------------------------------------------------------
    Client: order detail
 ---------------------------------------------------------- */
-function ClientOrderDetail({ order, producerSettings, onBack, onUpdate }) {
+function ClientOrderDetail({ order, producerSettings, onBack, onUpdate, onDelete }) {
   const [proofText, setProofText] = useState(order.paymentProof || "");
   const [showPay, setShowPay] = useState(false);
 
@@ -715,11 +816,22 @@ function ClientOrderDetail({ order, producerSettings, onBack, onUpdate }) {
     await onUpdate({ ...order, paymentProof: proofText, status: "aguardando_pgto" });
   };
 
+  const handleDelete = () => {
+    if (window.confirm(`Apagar "${order.title || "essa produção"}"? Essa ação não pode ser desfeita.`)) {
+      onDelete(order.id);
+    }
+  };
+
   return (
     <div className="max-w-2xl mx-auto">
-      <button onClick={onBack} className="mb-6 font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}>
-        <ArrowLeft size={14} /> voltar
-      </button>
+      <div className="flex items-center justify-between mb-6">
+        <button onClick={onBack} className="font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}>
+          <ArrowLeft size={14} /> voltar
+        </button>
+        <button onClick={handleDelete} className="font-mono text-xs flex items-center gap-1.5" style={{ color: "#C6342A" }}>
+          <Trash2 size={14} /> enviei errado, apagar
+        </button>
+      </div>
 
       <div className="flex items-center justify-between mb-6">
         <h1 className="font-display text-2xl">{order.title}</h1>
@@ -780,7 +892,7 @@ function ClientOrderDetail({ order, producerSettings, onBack, onUpdate }) {
             <div className="p-5 text-center" style={{ background: "#1D1A16", border: "1px solid #4E9463" }}>
               <CheckCircle2 className="mx-auto mb-2" size={22} style={{ color: "#4E9463" }} />
               <p className="font-mono text-sm mb-4">Pagamento confirmado! Sua música está liberada.</p>
-              <a href={order.finalAudio} download={`${order.title}.webm`}>
+              <a href={order.finalAudio} download={order.title}>
                 <PrimaryButton><Download size={16} /> Baixar música final</PrimaryButton>
               </a>
             </div>
@@ -836,7 +948,14 @@ function ProducerLogin({ hasPassword, onAuth }) {
 /* ---------------------------------------------------------
    Producer: dashboard
 ---------------------------------------------------------- */
-function ProducerDashboard({ orders, onOpen, onConfig, onLogout }) {
+function ProducerDashboard({ orders, onOpen, onDelete, onConfig, onLogout }) {
+  const handleDelete = (e, o) => {
+    e.stopPropagation();
+    if (window.confirm(`Apagar o pedido "${o.title}" de ${o.clientName}? Essa ação não pode ser desfeita.`)) {
+      onDelete(o.id);
+    }
+  };
+
   return (
     <div>
       <div className="flex items-start justify-between mb-8">
@@ -858,7 +977,15 @@ function ProducerDashboard({ orders, onOpen, onConfig, onLogout }) {
       ) : (
         <div className="grid sm:grid-cols-2 gap-6">
           {orders.map((o, i) => (
-            <button key={o.id} onClick={() => onOpen(o.id)} className="text-left">
+            <div key={o.id} onClick={() => onOpen(o.id)} className="text-left cursor-pointer relative">
+              <button
+                onClick={(e) => handleDelete(e, o)}
+                title="Apagar pedido"
+                className="absolute -top-2 -right-2 z-10 w-7 h-7 flex items-center justify-center rounded-full"
+                style={{ background: "#8F2019", color: "#ECE3D0", boxShadow: "2px 2px 0 #141210" }}
+              >
+                <Trash2 size={14} />
+              </button>
               <TapeLabel rotate={i % 2 === 0 ? 1 : -1}>
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-mono text-[10px] tracking-widest" style={{ color: "#8a8378" }}>{o.clientName}</span>
@@ -867,7 +994,7 @@ function ProducerDashboard({ orders, onOpen, onConfig, onLogout }) {
                 <div className="font-display text-lg" style={{ color: "#141210" }}>{o.title}</div>
                 <div className="text-xs mt-1" style={{ color: "#5c564b" }}>{o.genre} · {o.bpm} BPM</div>
               </TapeLabel>
-            </button>
+            </div>
           ))}
         </div>
       )}
@@ -878,9 +1005,15 @@ function ProducerDashboard({ orders, onOpen, onConfig, onLogout }) {
 /* ---------------------------------------------------------
    Producer: order detail
 ---------------------------------------------------------- */
-function ProducerOrderDetail({ order, onBack, onUpdate }) {
+function ProducerOrderDetail({ order, onBack, onUpdate, onDelete }) {
   const previewInputRef = useRef(null);
   const finalInputRef = useRef(null);
+
+  const handleDelete = () => {
+    if (window.confirm(`Apagar o pedido "${order.title}" de ${order.clientName}? Essa ação não pode ser desfeita.`)) {
+      onDelete(order.id);
+    }
+  };
 
   const handleFileUpload = async (e, field) => {
     const file = e.target.files?.[0];
@@ -901,9 +1034,14 @@ function ProducerOrderDetail({ order, onBack, onUpdate }) {
 
   return (
     <div className="max-w-2xl mx-auto">
-      <button onClick={onBack} className="mb-6 font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}>
-        <ArrowLeft size={14} /> voltar ao painel
-      </button>
+      <div className="flex items-center justify-between mb-6">
+        <button onClick={onBack} className="font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}>
+          <ArrowLeft size={14} /> voltar ao painel
+        </button>
+        <button onClick={handleDelete} className="font-mono text-xs flex items-center gap-1.5" style={{ color: "#C6342A" }}>
+          <Trash2 size={14} /> apagar pedido
+        </button>
+      </div>
 
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -970,18 +1108,118 @@ function ProducerOrderDetail({ order, onBack, onUpdate }) {
 function ProducerSettingsView({ settings, onSave, onBack }) {
   const [whatsapp, setWhatsapp] = useState(settings.whatsapp || "");
   const [pix, setPix] = useState(settings.pix || "");
+  const [aboutText, setAboutText] = useState(settings.aboutText || "");
+  const [photos, setPhotos] = useState(settings.photos || []);
+  const [audioExamples, setAudioExamples] = useState(settings.audioExamples || []);
+  const [newExampleTitle, setNewExampleTitle] = useState("");
   const [saved, setSaved] = useState(false);
+  const photoInputRef = useRef(null);
+  const audioInputRef = useRef(null);
 
   const save = async () => {
-    await onSave({ ...settings, whatsapp, pix });
+    await onSave({ ...settings, whatsapp, pix, aboutText, photos, audioExamples });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
 
+  const addPhotos = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const b64s = await Promise.all(files.map(blobToBase64));
+    setPhotos((prev) => [...prev, ...b64s]);
+    e.target.value = "";
+  };
+
+  const removePhoto = (i) => {
+    setPhotos((prev) => prev.filter((_, idx) => idx !== i));
+  };
+
+  const pickAudioExample = () => {
+    if (!newExampleTitle.trim()) {
+      window.alert("Dê um nome para o exemplo antes de escolher o áudio.");
+      return;
+    }
+    audioInputRef.current?.click();
+  };
+
+  const addAudioExample = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const b64 = await blobToBase64(file);
+    setAudioExamples((prev) => [...prev, { title: newExampleTitle.trim(), audio: b64 }]);
+    setNewExampleTitle("");
+    e.target.value = "";
+  };
+
+  const removeAudioExample = (i) => {
+    setAudioExamples((prev) => prev.filter((_, idx) => idx !== i));
+  };
+
   return (
     <div className="max-w-md mx-auto">
-      <button onClick={onBack} className="
+      <button onClick={onBack} className="mb-6 font-mono text-xs flex items-center gap-1.5" style={{ color: "#8a8378" }}>
+        <ArrowLeft size={14} /> voltar
+      </button>
+      <h1 className="font-display text-2xl mb-6">DADOS DE PAGAMENTO</h1>
+      <div className="p-6 mb-8" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+        <Field label="WhatsApp para contato">
+          <input value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} className="w-full px-3 py-2.5" style={inputStyle} placeholder="(00) 00000-0000" />
         </Field>
-        <PrimaryButton onClick={save} full>{saved ? <><CheckCircle2 size={16} /> Salvo!</> : "Salvar dados"}</PrimaryButton>
+        <Field label="Chave Pix">
+          <input value={pix} onChange={(e) => setPix(e.target.value)} className="w-full px-3 py-2.5" style={inputStyle} placeholder="CPF, e-mail, telefone ou chave aleatória" />
+        </Field>
       </div>
-    </
+
+      <h1 className="font-display text-2xl mb-2">APRESENTAÇÃO DO ESTÚDIO</h1>
+      <p className="text-xs mb-6" style={{ color: "#8a8378" }}>Isso aparece para o cliente antes de ele fazer login.</p>
+      <div className="p-6 mb-8" style={{ background: "#1D1A16", border: "1px solid #3A342C" }}>
+        <Field label="Texto sobre o estúdio">
+          <textarea value={aboutText} onChange={(e) => setAboutText(e.target.value)} rows={5} className="w-full px-3 py-2.5" style={inputStyle} placeholder="Conte um pouco sobre você, sua experiência e o estúdio…" />
+        </Field>
+
+        <div className="mb-5">
+          <span className="block mb-1.5 text-xs font-mono uppercase tracking-widest" style={{ color: "#8a8378" }}>Fotos do estúdio</span>
+          {photos.length > 0 && (
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              {photos.map((src, i) => (
+                <div key={i} className="relative">
+                  <img src={src} alt={`Foto ${i + 1}`} className="w-full h-16 object-cover border" style={{ borderColor: "#3A342C" }} />
+                  <button
+                    onClick={() => removePhoto(i)}
+                    className="absolute -top-1.5 -right-1.5 w-5 h-5 flex items-center justify-center rounded-full"
+                    style={{ background: "#8F2019", color: "#ECE3D0" }}
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <input ref={photoInputRef} type="file" accept="image/*" multiple className="hidden" onChange={addPhotos} />
+          <GhostButton onClick={() => photoInputRef.current?.click()}><UploadIcon size={14} /> Adicionar fotos</GhostButton>
+        </div>
+
+        <div>
+          <span className="block mb-1.5 text-xs font-mono uppercase tracking-widest" style={{ color: "#8a8378" }}>Exemplos de áudio</span>
+          {audioExamples.length > 0 && (
+            <div className="space-y-2 mb-3">
+              {audioExamples.map((ex, i) => (
+                <div key={i} className="p-3 flex items-center justify-between gap-2" style={{ background: "#141210", border: "1px solid #3A342C" }}>
+                  <span className="text-sm truncate">{ex.title}</span>
+                  <button onClick={() => removeAudioExample(i)} style={{ color: "#C6342A" }}><Trash2 size={14} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <input value={newExampleTitle} onChange={(e) => setNewExampleTitle(e.target.value)} className="flex-1 px-3 py-2.5 text-sm" style={inputStyle} placeholder="Nome do exemplo" />
+            <GhostButton onClick={pickAudioExample}><UploadIcon size={14} /> Áudio</GhostButton>
+          </div>
+          <input ref={audioInputRef} type="file" accept="audio/*" className="hidden" onChange={addAudioExample} />
+        </div>
+      </div>
+
+      <PrimaryButton onClick={save} full>{saved ? <><CheckCircle2 size={16} /> Salvo!</> : "Salvar tudo"}</PrimaryButton>
+    </div>
+  );
+}
